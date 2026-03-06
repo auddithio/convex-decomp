@@ -18,7 +18,17 @@ from trellis.modules.sparse import SparseTensor
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 
-HIGH_LOSS_THRESHOLD = 0
+HIGH_LOSS_THRESHOLD = 1e5
+NUM_BAD_EXAMPLES_TO_LOG = 5
+SKIP_NUM = 50000
+
+# TODO: move importance model
+# scale errors by the importance model for each voxel
+# look at cost for the CoACD
+# what are the costs for the CoACD decomposition? maybe we can use that as a signal for which samples are harder and should be weighted more in the loss?
+# it's a C++ code, we need to compile it and run it on the dataset to get the costs. We can then save those costs in a file and load them in the training loop to weight the loss for each sample accordingly. This way, we can focus more on the harder samples that have higher costs in the CoACD decomposition, which might lead to better overall performance of our model.
+# look into the VHACD. convexdecomp
+# how to incorporate
 
 # convert dense voxel grids into SparseTensor
 def dense_to_sparse(voxel_grid, threshold=0.0):
@@ -72,28 +82,6 @@ class SLatMeshTrainer(L.LightningModule):
                                             }
                                         )
         
-        # variable: convex combination weights
-        # parameters: vertex positions and query point
-        # n_verts = 60
-        # w = cp.Variable(n_verts)
-        # V = cp.Parameter((3, n_verts))
-        # q = cp.Parameter(3)
-
-        # objective = cp.Minimize(0.5 * cp.sum_squares(V @ w - q))
-        # constraints = [cp.sum(w) == 1, w >= 0]
-
-        # problem = cp.Problem(objective, constraints)
-
-        # self.convex_proj_layer = CvxpyLayer(problem, parameters=[V, q], variables=[w])
-        # print(convex_proj_layer.device)
-        # self.convex_proj_layer = CPUWrapper(convex_proj_layer)
-        # assert 1 == 2
-
-        # for p in self.convex_proj_layer.parameters():
-        #     print(p.device)
-        #     assert p.device != torch.device('cpu')
-        #     print("Confirmed at init.\n")
-        # assert 1 == 2 
 
     def forward(self, sparse_voxels):
         """
@@ -116,7 +104,7 @@ class SLatMeshTrainer(L.LightningModule):
 
         Args:
             mesh_points: (N, 3)
-            inclusion_probabilities: (N, K) -> # TODO: change to (B, N, K) for batching
+            inclusion_probabilities: (N, K) 
             num_samples: int (number of samples per cluster)
         Returns:
             sampled_points: (K * num_samples, 3)
@@ -212,7 +200,7 @@ class SLatMeshTrainer(L.LightningModule):
         # avoid flooding W&B
         if not hasattr(self, "_bad_example_count"):
             self._bad_example_count = 0
-        if self._bad_example_count > 5:  # max 5 per run
+        if self._bad_example_count > NUM_BAD_EXAMPLES_TO_LOG: 
             return
 
         self._bad_example_count += 1
@@ -264,6 +252,10 @@ class SLatMeshTrainer(L.LightningModule):
         gt_vertices = batch["sequence"]
 
         sparse_vox = dense_to_sparse(voxels)
+
+        if sparse_vox.feats.shape[0] > SKIP_NUM:
+            print(f"Skipping batch {batch_idx}: {sparse_vox.feats.shape[0]} occupied voxels")
+            return None # skip this batch to avoid OOM, TODO: handle better, maybe by sub-sampling the voxels?
 
         if sparse_vox.feats.shape[0] > self.biggest_input_size:
             self.biggest_input_size = sparse_vox.feats.shape[0]
@@ -382,10 +374,11 @@ if __name__ == "__main__":
 
     train_ds = VoxelDataset(
         model_list="regular_submeshes.txt",
-        # voxel_directory="/scr/aunag/objaverse/voxels/",
-        # coacd_directory="/scr/aunag/objaverse/coacd/"
-        voxel_directory="/vision/group/objaverse/voxels",
-        coacd_directory="/vision/group/objaverse/affogato_subset/coacd"
+        # voxel_directory="/vision/group/objaverse/voxels_2.0",
+        # coacd_directory="/vision/group/objaverse/affogato_subset/coacd",
+        voxel_directory="/scr/aunag/objaverse/voxels_2.0/",
+        coacd_directory="/scr/aunag/objaverse/coacd/",
+        stats_dir="./mesh_stats/"
     ) 
     
     # TODO: remove later, for debugging, use only 10 samples
@@ -398,7 +391,7 @@ if __name__ == "__main__":
     model = SLatMeshTrainer(lr=1e-4)
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints_002/",
+        dirpath="checkpoints_scaled/",
         filename="epoch_{epoch:04d}",
         every_n_epochs=1,
         save_top_k=-1,      # keep all checkpoints
@@ -411,9 +404,8 @@ if __name__ == "__main__":
         max_epochs=100,
         log_every_n_steps=1,
         precision=16,
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback], # [CUDAMemorySnapshotCallback(every_n_steps=1)],
         logger=wandb_logger, 
-        # callbacks=[CUDAMemorySnapshotCallback(every_n_steps=1)],
         # profiler="pytorch",
     )
 
@@ -426,8 +418,6 @@ if __name__ == "__main__":
         print("Training complete.")
 
     except Exception as e:
-        print("Exception occurred, dumping memory snapshot...")
-        # torch.cuda.memory._dump_snapshot("exception_snapshot.pickle")
         traceback.print_exc()
         raise
 

@@ -8,11 +8,38 @@ import argparse
 # 1. we're doing surface voxelisation (hollowed) for the input meshes, not occupancy grids
 # 2. this normalisation does NOT preserve aspect ratio!
 
-# TODO: save origin and transform for each mesh
+def voxelize_mesh_with_info(mesh: trimesh.Trimesh, resolution: int = 64):
+    bounds = mesh.bounds
+    center = (bounds[0] + bounds[1]) / 2
+    scale = np.max(bounds[1] - bounds[0])
+
+    mesh = mesh.copy()
+    mesh.vertices = (mesh.vertices - center) / scale  # → [-0.5, 0.5]
+
+    if not mesh.is_watertight:
+        filled = mesh.fill_holes()
+        if filled is not None:
+            mesh = filled
+
+    pitch = 1.0 / resolution
+    vg = mesh.voxelized(pitch=pitch)
+
+    occupied = vg.sparse_indices
+    origin = vg.origin
+    world_pts = occupied * pitch + origin
+    coords = np.floor((world_pts + 0.5) * resolution).astype(int)
+
+    grid = np.zeros((resolution, resolution, resolution), dtype=np.float32)
+    valid = np.all((coords >= 0) & (coords < resolution), axis=1)
+    grid[coords[valid, 0], coords[valid, 1], coords[valid, 2]] = 1.0
+
+    # Return grid + the transform needed to align CoACD targets
+    return torch.from_numpy(grid), center, scale
 
 
 def voxelize_mesh(mesh: trimesh.Trimesh, resolution: int = 64) -> torch.Tensor:
-    """Convert a mesh to voxel grid tensor of shape [D, H, W]."""
+    """TODO: Remove, faulty
+    Convert a mesh to voxel grid tensor of shape [D, H, W]."""
     bounds = mesh.bounds
     center = (bounds[0] + bounds[1]) / 2
     scale = np.max(bounds[1] - bounds[0])
@@ -54,7 +81,7 @@ def preprocess_voxels(input_dir: str, output_dir: str, resolution: int = 64):
                 vertices = np.concatenate(vertices, axis=0)
 
             mesh = trimesh.Trimesh(vertices=vertices)
-            voxels = voxelize_mesh(mesh, resolution)
+            voxels = voxelize_mesh_with_info(mesh, resolution)
             np.savez_compressed(output_path / f"{npz_file.stem}.npz", voxels=voxels.numpy())
 
             print(f"[{i+1}/{len(npz_files)}] Saved: {npz_file.stem}.npz")
