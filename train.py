@@ -414,7 +414,7 @@ if __name__ == "__main__":
     import traceback
 
     try:
-        trainer.fit(model, train_loader)
+        trainer.fit(model, train_loader, ckpt_path="checkpoints_scaled/last.ckpt")
         print("Training complete.")
 
     except Exception as e:
